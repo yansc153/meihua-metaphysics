@@ -1,0 +1,103 @@
+services:
+  postgres:
+    image: postgres:16.4-alpine3.20
+    environment:
+      POSTGRES_DB: huajiao
+      POSTGRES_USER: huajiao
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U huajiao"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  meihua:
+    build:
+      context: ..
+      dockerfile: meihua/Dockerfile
+    environment:
+      MEIHUA_CSV: /srv/data/2026_us_daily.csv
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/v1/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/backend.Dockerfile
+      network: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meihua:
+        condition: service_healthy
+    environment:
+      MEIHUA_URL: http://meihua:8090
+      DATABASE_URL: postgres://huajiao:${DB_PASSWORD:?DB_PASSWORD must be set}@postgres:5432/huajiao
+      BACKEND_PORT: "8080"
+      BACKEND_BIND_ADDR: "0.0.0.0"
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      AUTH_CODE_HMAC_SECRET: ${AUTH_CODE_HMAC_SECRET:-}
+      ML_HOOK_SECRET: ${ML_HOOK_SECRET:-}
+      ML_BARS_PROXY: ${ML_BARS_PROXY:-}
+      ML_BARS_PROXY_KEY: ${ML_BARS_PROXY_KEY:-}
+      # 容器出网绕过宿主 TUN，国际源直连被断/间歇掐（2026-10-09 实测：bars 全超时、
+      # resend 发码 502）：国际出口统一走宿主代理，国内源由代理规则分流直连。
+      ML_BARS_HTTP_PROXY: ${ML_BARS_HTTP_PROXY:-}
+      EGRESS_HTTP_PROXY: ${EGRESS_HTTP_PROXY:-}
+      RUST_LOG: info
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      PA_COOKIE: ${PA_COOKIE:-}
+      CLOUDGN_KEY_BLOB: ${CLOUDGN_KEY_BLOB:-}
+      CLOUDGN_IV_BASE64: ${CLOUDGN_IV_BASE64:-}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # 4H bar 导出目录（owner 本地管线 dump 的口径真源；ml-bars 端点优先读这里）
+      - ../data/ml-bars:/app/data/ml-bars:ro
+    healthcheck:
+      # Container liveness only: both 200 and 503 count as healthy so that the
+      # honest collection-freshness degradation (503 outside trading windows)
+      # does not tear down frontend via depends_on service_healthy.
+      test: ["CMD-SHELL", "code=$$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health/ready); [ \"$$code\" = 200 ] || [ \"$$code\" = 503 ]"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:8080"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  pgdata:
